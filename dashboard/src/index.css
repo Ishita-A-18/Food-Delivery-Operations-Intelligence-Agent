@@ -1,0 +1,190 @@
+:root {
+  --bg-primary: #0f1117;
+  --bg-secondary: #161b27;
+  --bg-card: #1c2333;
+  --bg-hover: #222d42;
+
+  --border: #2a3550;
+  --border-light: #1f2d45;
+
+  --text-primary: #e8eaf0;
+  --text-secondary: #8892a4;
+  --text-tertiary: #4e5a6e;
+
+  --green: #22c55e;
+  --amber: #f59e0b;
+  --red: #ef4444;
+  --blue: #3b82f6;
+  --purple: #a855f7;
+
+  --font: "Inter", system-ui, sans-serif;
+  --radius: 10px;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* ── Layout ──────────────────────────────────────────────────── */
+
+.app-shell {
+  display: grid;
+  grid-template-rows: 52px 1fr 64px;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border);
+  gap: 12px;
+}
+
+.topbar h1 {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+}
+
+.topbar .ws-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--red);
+  flex-shrink: 0;
+}
+.topbar .ws-dot.connected {
+  background: var(--green);
+}
+
+.main-grid {
+  display: grid;
+  grid-template-columns: 1fr 380px;
+  overflow: hidden;
+}
+
+.left-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+}
+
+.right-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  gap: 0;
+}
+
+.panel-section {
+  border-bottom: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+.panel-section:last-child {
+  border-bottom: none;
+}
+
+.bottombar {
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+}
+
+/* ── Card base ───────────────────────────────────────────────── */
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+
+/* ── Status badges ───────────────────────────────────────────── */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.badge-normal   { background: #14532d33; color: var(--green); border: 1px solid #14532d; }
+.badge-watch    { background: #78350f33; color: var(--amber); border: 1px solid #78350f; }
+.badge-critical { background: #7f1d1d33; color: var(--red);   border: 1px solid #7f1d1d; }
+.badge-pending  { background: #78350f33; color: var(--amber); border: 1px solid #78350f; }
+.badge-approved { background: #1e3a5f33; color: var(--blue);  border: 1px solid #1e3a5f; }
+.badge-executed { background: #4a1d9633; color: var(--purple);border: 1px solid #4a1d96; }
+.badge-resolved { background: #14532d33; color: var(--green); border: 1px solid #14532d; }
+.badge-rejected  { background: #1f2937;   color: var(--text-secondary); border: 1px solid var(--border); }
+.badge-proactive { background: #0c4a6e33; color: #38bdf8;  border: 1px solid #0c4a6e; }
+
+/* ── Buttons ─────────────────────────────────────────────────── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 7px 16px;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: none;
+  transition: opacity 0.15s;
+}
+.btn:hover { opacity: 0.85; }
+.btn:active { opacity: 0.7; }
+
+.btn-approve { background: #16a34a; color: #fff; }
+.btn-reject  { background: #374151; color: var(--text-secondary); }
+.btn-modify  { background: #1d4ed8; color: #fff; }
+
+/* ── Section headers ─────────────────────────────────────────── */
+
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  border-bottom: 1px solid var(--border-light);
+}
+
+/* ── Animations ──────────────────────────────────────────────── */
+
+@keyframes slide-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse-ring {
+  0%   { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+  70%  { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+
+.slide-in { animation: slide-in 0.25s ease; }
+.pulse    { animation: pulse-ring 1.5s infinite; }
