@@ -179,7 +179,7 @@ def run_gemini_cycle(db, anomalies: list, manager_goal: str = None) -> bool:
     try:
         client = genai.Client(api_key=api_key)
         chat = client.chats.create(
-            model="gemini-2.0-flash-lite",
+            model="gemini-2.5-flash",
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
                 tools=[

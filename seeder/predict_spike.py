@@ -35,6 +35,7 @@ EVENTS = {
         "affected_zones":             ["zone_02", "zone_03"],
         "expected_spike_after_minutes": 15,
         "inject_trigger":             "ipl_spike",
+        "surplus_zone":               {"zone_id": "zone_01", "idle_agents": 28, "active_orders": 4, "total_agents": 30},
     },
     "concert": {
         "event_id":                   "concert_palace_grounds",
@@ -43,6 +44,7 @@ EVENTS = {
         "affected_zones":             ["zone_10", "zone_11"],
         "expected_spike_after_minutes": 20,
         "inject_trigger":             "concert_spike",
+        "surplus_zone":               {"zone_id": "zone_14", "idle_agents": 26, "active_orders": 3, "total_agents": 28},
     },
     "new_year": {
         "event_id":                   "new_year_eve_bangalore",
@@ -51,6 +53,7 @@ EVENTS = {
         "affected_zones":             ["zone_18", "zone_01", "zone_03"],
         "expected_spike_after_minutes": 0,
         "inject_trigger":             "new_year_spike",
+        "surplus_zone":               {"zone_id": "zone_20", "idle_agents": 26, "active_orders": 3, "total_agents": 28},
     },
     "monsoon": {
         "event_id":                   "monsoon_heavy_rain",
@@ -59,6 +62,7 @@ EVENTS = {
         "affected_zones":             ["zone_06", "zone_13", "zone_17", "zone_04"],
         "expected_spike_after_minutes": 10,
         "inject_trigger":             "monsoon_spike",
+        "surplus_zone":               {"zone_id": "zone_12", "idle_agents": 26, "active_orders": 3, "total_agents": 28},
     },
     "techpark": {
         "event_id":                   "techpark_quarter_end",
@@ -67,6 +71,7 @@ EVENTS = {
         "affected_zones":             ["zone_05", "zone_08"],
         "expected_spike_after_minutes": 30,
         "inject_trigger":             "techpark_spike",
+        "surplus_zone":               {"zone_id": "zone_07", "idle_agents": 26, "active_orders": 4, "total_agents": 28},
     },
     "diwali": {
         "event_id":                   "diwali_2024",
@@ -75,6 +80,7 @@ EVENTS = {
         "affected_zones":             ["zone_06", "zone_09", "zone_17"],
         "expected_spike_after_minutes": 0,
         "inject_trigger":             "diwali_spike",
+        "surplus_zone":               {"zone_id": "zone_12", "idle_agents": 26, "active_orders": 4, "total_agents": 28},
     },
 }
 
@@ -90,13 +96,30 @@ def schedule_event(event_key: str = "ipl", minutes_from_now: int = 45):
     db.scheduled_events.replace_one(
         {"event_id": event["event_id"]},
         {
-            **event,
+            **{k: v for k, v in event.items() if k != "surplus_zone"},
             "scheduled_time":  scheduled_time,
             "status":          "upcoming",
             "created_at":      datetime.utcnow().isoformat(),
         },
         upsert=True,
     )
+
+    # Inject surplus agents into a quiet zone so Gemini has agents to move
+    surplus = event.get("surplus_zone")
+    if surplus:
+        db.city_grid.update_one(
+            {"zone_id": surplus["zone_id"]},
+            {"$set": {
+                "idle_agents":   surplus["idle_agents"],
+                "active_orders": surplus["active_orders"],
+                "total_agents":  surplus["total_agents"],
+                "avg_wait_minutes": 7.0,
+                "status":        "normal",
+                "last_updated":  datetime.utcnow().isoformat(),
+            }},
+        )
+        sz = db.city_grid.find_one({"zone_id": surplus["zone_id"]}, {"name": 1})
+        print(f"  Surplus zone : {sz['name']} ({surplus['zone_id']}) — {surplus['idle_agents']} idle agents staged")
 
     zone_names = []
     for zid in event["affected_zones"]:

@@ -156,14 +156,17 @@ async def simulate_acknowledgements():
     """Simulate agents tapping 'got it' 30 seconds after notification."""
     db = get_async_db()
     while True:
-        cutoff = (datetime.utcnow() - timedelta(seconds=30)).isoformat()
-        await db.agent_notifications.update_many(
-            {"status": "sent", "sent_at": {"$lt": cutoff}},
-            {"$set": {
-                "status": "acknowledged",
-                "acknowledged_at": datetime.utcnow().isoformat(),
-            }},
-        )
+        try:
+            cutoff = (datetime.utcnow() - timedelta(seconds=30)).isoformat()
+            await db.agent_notifications.update_many(
+                {"status": "sent", "sent_at": {"$lt": cutoff}},
+                {"$set": {
+                    "status": "acknowledged",
+                    "acknowledged_at": datetime.utcnow().isoformat(),
+                }},
+            )
+        except Exception as exc:
+            print(f"[simulate_acknowledgements] error: {exc}", flush=True)
         await asyncio.sleep(10)
 
 
