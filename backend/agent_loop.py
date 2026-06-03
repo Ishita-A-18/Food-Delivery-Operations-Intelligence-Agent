@@ -11,6 +11,7 @@ from tools.read_city_state import read_city_state
 from tools.execute_action import execute_action
 from tools.close_incident import close_incident
 from gemini_agent import run_gemini_cycle
+from zone_distances import multi_source_moves
 
 
 def agent_loop() -> None:
@@ -40,8 +41,15 @@ def agent_loop() -> None:
             pending_goal = db.manager_goals.find_one({"status": "pending"})
             if pending_goal:
                 goal_text = pending_goal.get("goal", "")
+                pending_ids_before = {
+                    a["action_id"] for a in db.action_log.find({"status": "pending"}, {"action_id": 1})
+                }
                 ok = run_gemini_cycle(db, anomalies, manager_goal=goal_text)
-                if not ok:
+                pending_ids_after = {
+                    a["action_id"] for a in db.action_log.find({"status": "pending"}, {"action_id": 1})
+                }
+                # If Gemini ran but proposed nothing, use fallback
+                if not pending_ids_after - pending_ids_before:
                     _fallback_goal(db, goal_text)
                 db.manager_goals.update_one(
                     {"_id": pending_goal["_id"]},
@@ -76,61 +84,42 @@ def _fallback_goal(db, goal_text: str) -> None:
     """Fallback handler for manager chat goals when Gemini is unavailable."""
     goal_lower = goal_text.lower()
 
-    # Try to find a zone mentioned by name in the goal
-    zones = list(db.city_grid.find())
+    all_zones = list(db.city_grid.find())
     target_zone = None
-    for z in zones:
+    for z in all_zones:
         if z["name"].lower() in goal_lower:
             target_zone = z
             break
 
-    # Fall back to worst zone by wait time
     if not target_zone:
-        zones_sorted = sorted(zones, key=lambda z: z["avg_wait_minutes"], reverse=True)
-        # Skip zones that already have a pending action
+        zones_sorted = sorted(all_zones, key=lambda z: z["avg_wait_minutes"], reverse=True)
         pending = {d.get("trigger_zone") for d in db.action_log.find({"status": "pending"}, {"trigger_zone": 1})}
-        target_zone = next((z for z in zones_sorted if z["zone_id"] not in pending), zones_sorted[0])
+        target_zone = next((z for z in zones_sorted if z["zone_id"] not in pending), zones_sorted[0] if zones_sorted else None)
 
     if not target_zone:
         return
 
     zone_id = target_zone["zone_id"]
-    existing = db.action_log.find_one({"trigger_zone": zone_id, "status": "pending"})
-    if existing:
+    if db.action_log.find_one({"trigger_zone": zone_id, "status": "pending"}):
         return
 
-    # Find best source zone
-    all_zones = list(db.city_grid.find())
-    sources = sorted(
-        [z for z in all_zones if z["idle_agents"] > 5 and z["zone_id"] != zone_id],
-        key=lambda z: z["idle_agents"], reverse=True
-    )
-    if not sources:
+    moves, descriptions = multi_source_moves(db, zone_id, 6, all_zones)
+    if not moves:
         return
 
-    source = sources[0]
-    agents = list(db.agents.aggregate([
-        {"$match": {"current_zone": source["zone_id"], "status": "idle"}},
-        {"$sample": {"size": 5}},
-    ]))
-    if not agents:
-        return
-
-    moves = [{"type": "move_agent", "agent_id": a["agent_id"],
-              "from_zone": source["zone_id"], "to_zone": zone_id} for a in agents]
-
+    sources_text = " · ".join(descriptions)
     action = {
         "action_id":        f"act_{uuid4().hex[:6]}",
         "type":             "agent_redistribution",
         "status":           "pending",
         "trigger_zone":     zone_id,
         "zone_id":          zone_id,
-        "recommendation":   f"Move {len(moves)} agents from {source['name']} to {target_zone['name']}",
+        "recommendation":   f"Move {len(moves)} agents to {target_zone['name']} from nearby zones",
         "reasoning":        (
             f"Manager escalation: \"{goal_text}\". "
-            f"{target_zone['name']} currently has {target_zone['active_orders']} active orders "
+            f"{target_zone['name']} has {target_zone['active_orders']} active orders "
             f"with {target_zone['idle_agents']} idle agents (avg wait {target_zone['avg_wait_minutes']} min). "
-            f"Proposing to move {len(moves)} agents from {source['name']} which has {source['idle_agents']} idle."
+            f"Sourcing {len(moves)} agents from: {sources_text}."
         ),
         "proposed_actions": moves,
         "created_at":       datetime.utcnow().isoformat(),
@@ -138,7 +127,7 @@ def _fallback_goal(db, goal_text: str) -> None:
         "modification": None, "executed_at": None, "outcome": None,
     }
     db.action_log.insert_one(action)
-    print(f"[fallback] goal → proposed {action['action_id']} for {zone_id}", flush=True)
+    print(f"[fallback] goal → proposed {action['action_id']} for {zone_id} from [{sources_text}]", flush=True)
 
 
 def _fallback_propose(db, anomalies: list) -> None:
@@ -146,6 +135,7 @@ def _fallback_propose(db, anomalies: list) -> None:
     pending_docs = list(db.action_log.find({"status": "pending"}, {"trigger_zone": 1}))
     pending_zone_ids = {d.get("trigger_zone") for d in pending_docs if d.get("trigger_zone")}
     proposed = 0
+    all_zones = list(db.city_grid.find())
 
     for anomaly in anomalies[:2]:
         if proposed >= 2:
@@ -154,22 +144,13 @@ def _fallback_propose(db, anomalies: list) -> None:
         zone_id = zone["zone_id"]
         if zone_id in pending_zone_ids:
             continue
-        if not anomaly["candidate_sources"]:
+
+        needed = min(anomaly["agent_shortage"], 11)
+        moves, descriptions = multi_source_moves(db, zone_id, needed, all_zones)
+        if not moves:
             continue
 
-        source = anomaly["candidate_sources"][0]
-        n = min(anomaly["agent_shortage"], 11)
-        agents = list(db.agents.aggregate([
-            {"$match": {"current_zone": source["zone_id"], "status": "idle"}},
-            {"$sample": {"size": n}},
-        ]))
-        if not agents:
-            continue
-
-        moves = [{"type": "move_agent", "agent_id": a["agent_id"],
-                  "from_zone": source["zone_id"], "to_zone": zone_id} for a in agents]
-
-        # Check historical pattern for richer reasoning
+        sources_text = " · ".join(descriptions)
         pattern = db.historical_patterns.find_one({"affected_zone": zone_id})
         if pattern:
             reasoning = (
@@ -177,6 +158,7 @@ def _fallback_propose(db, anomalies: list) -> None:
                 f"{zone['idle_agents']} idle agents (avg wait {zone['avg_wait_minutes']} min). "
                 f"Historical data ({pattern['occurrences']} past occurrences): "
                 f"avg resolution {pattern['avg_resolution_minutes']} min via redistribution. "
+                f"Sourcing {len(moves)} agents from nearby zones: {sources_text}. "
                 f"{pattern.get('notes', '')}"
             )
         else:
@@ -184,7 +166,7 @@ def _fallback_propose(db, anomalies: list) -> None:
                 f"{zone['name']} has {zone['active_orders']} active orders with only "
                 f"{zone['idle_agents']} idle agents (avg wait {zone['avg_wait_minutes']} min). "
                 f"Agent shortage: {anomaly['agent_shortage']}. "
-                f"Proposing standard redistribution from {source['name']}."
+                f"Sourcing {len(moves)} agents from nearby zones: {sources_text}."
             )
 
         action = {
@@ -193,7 +175,7 @@ def _fallback_propose(db, anomalies: list) -> None:
             "status":           "pending",
             "trigger_zone":     zone_id,
             "zone_id":          zone_id,
-            "recommendation":   f"Move {len(moves)} agents from {source['name']} to {zone['name']}",
+            "recommendation":   f"Move {len(moves)} agents to {zone['name']} from nearby zones",
             "reasoning":        reasoning,
             "proposed_actions": moves,
             "created_at":       datetime.utcnow().isoformat(),
@@ -203,9 +185,8 @@ def _fallback_propose(db, anomalies: list) -> None:
         db.action_log.insert_one(action)
         pending_zone_ids.add(zone_id)
         proposed += 1
-        print(f"[fallback] proposed {action['action_id']} for {zone_id}", flush=True)
+        print(f"[fallback] proposed {action['action_id']} for {zone_id} from [{sources_text}]", flush=True)
 
-    # Proactive fallback: check upcoming events
     if proposed < 2:
         _fallback_proactive(db, pending_zone_ids, proposed)
 
@@ -216,6 +197,8 @@ def _fallback_proactive(db, pending_zone_ids: set, already_proposed: int) -> Non
         {"status": "upcoming", "scheduled_time": {"$lte": cutoff}}
     ))
     proposed = already_proposed
+    all_zones = list(db.city_grid.find())
+
     for event in events:
         if proposed >= 2:
             break
@@ -228,23 +211,15 @@ def _fallback_proactive(db, pending_zone_ids: set, already_proposed: int) -> Non
             if not pattern:
                 continue
             zone = db.city_grid.find_one({"zone_id": zone_id})
-            all_zones = list(db.city_grid.find())
-            sources = sorted(
-                [z for z in all_zones if z["idle_agents"] > z["active_orders"] * 1.2 and z["zone_id"] != zone_id],
-                key=lambda z: z["idle_agents"], reverse=True
-            )
-            if not sources or not zone:
+            if not zone:
                 continue
-            source = sources[0]
-            n = pattern.get("avg_agents_moved", 8)
-            agents = list(db.agents.aggregate([
-                {"$match": {"current_zone": source["zone_id"], "status": "idle"}},
-                {"$sample": {"size": n}},
-            ]))
-            if not agents:
+
+            needed = pattern.get("avg_agents_moved", 8)
+            moves, descriptions = multi_source_moves(db, zone_id, needed, all_zones)
+            if not moves:
                 continue
-            moves = [{"type": "move_agent", "agent_id": a["agent_id"],
-                      "from_zone": source["zone_id"], "to_zone": zone_id} for a in agents]
+
+            sources_text = " · ".join(descriptions)
             scheduled_dt = datetime.fromisoformat(event["scheduled_time"])
             minutes_until = max(1, int((scheduled_dt - datetime.utcnow()).total_seconds() / 60))
             action = {
@@ -259,6 +234,7 @@ def _fallback_proactive(db, pending_zone_ids: set, already_proposed: int) -> Non
                     f"Historical data ({pattern['occurrences']} occurrences): "
                     f"{zone['name']} spikes {pattern['avg_demand_spike_percent']}%, "
                     f"resolved in {pattern['avg_resolution_minutes']} min via redistribution. "
+                    f"Sourcing {len(moves)} agents from nearby zones: {sources_text}. "
                     f"{pattern.get('notes', '')}"
                 ),
                 "proposed_actions": moves,
@@ -272,4 +248,4 @@ def _fallback_proactive(db, pending_zone_ids: set, already_proposed: int) -> Non
             )
             pending_zone_ids.add(zone_id)
             proposed += 1
-            print(f"[fallback] PROACTIVE {action['action_id']} for {zone_id} ({event['name']})", flush=True)
+            print(f"[fallback] PROACTIVE {action['action_id']} for {zone_id} from [{sources_text}]", flush=True)

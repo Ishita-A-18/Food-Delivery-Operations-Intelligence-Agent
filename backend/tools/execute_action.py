@@ -13,6 +13,8 @@ def execute_action(db, action_id: str) -> None:
             f"Cannot execute action {action_id} — status is '{action['status']}'"
         )
 
+    zone_deltas: dict[str, int] = {}  # zone_id → idle_agents delta
+
     for move in action.get("proposed_actions", []):
         if move["type"] == "move_agent":
             db.agents.update_one(
@@ -22,6 +24,9 @@ def execute_action(db, action_id: str) -> None:
                     "last_moved": datetime.utcnow().isoformat(),
                 }},
             )
+
+            zone_deltas[move["from_zone"]] = zone_deltas.get(move["from_zone"], 0) - 1
+            zone_deltas[move["to_zone"]]   = zone_deltas.get(move["to_zone"],   0) + 1
 
             dest_zone = db.city_grid.find_one({"zone_id": move["to_zone"]})
             zone_name = dest_zone["name"] if dest_zone else move["to_zone"]
@@ -45,10 +50,46 @@ def execute_action(db, action_id: str) -> None:
                 }},
             )
 
+    # Update city_grid and record before/after for each zone
+    zone_changes = []
+    for zone_id, delta in zone_deltas.items():
+        zone = db.city_grid.find_one({"zone_id": zone_id})
+        if not zone:
+            continue
+        idle_before = zone["idle_agents"]
+        new_idle    = max(0, idle_before + delta)
+        new_total   = max(new_idle, zone["total_agents"] + delta)
+        unserved    = max(0, zone["active_orders"] - (new_total - new_idle))
+        wait        = round(min(max(8.0 + unserved * 2.5, 4.0), 90.0), 1)
+        shortage    = zone["active_orders"] - new_idle
+        if wait > 35 and shortage > 5:
+            status = "critical"
+        elif wait > 22 or shortage > 3:
+            status = "watch"
+        else:
+            status = "normal"
+        db.city_grid.update_one(
+            {"zone_id": zone_id},
+            {"$set": {
+                "idle_agents":      new_idle,
+                "total_agents":     new_total,
+                "avg_wait_minutes": wait,
+                "status":           status,
+                "last_updated":     datetime.utcnow().isoformat(),
+            }},
+        )
+        zone_changes.append({
+            "zone_id":      zone_id,
+            "idle_before":  idle_before,
+            "idle_after":   new_idle,
+            "delta":        delta,
+        })
+
     db.action_log.update_one(
         {"action_id": action_id},
         {"$set": {
             "status": "executed",
             "executed_at": datetime.utcnow().isoformat(),
+            "zone_changes": zone_changes,
         }},
     )

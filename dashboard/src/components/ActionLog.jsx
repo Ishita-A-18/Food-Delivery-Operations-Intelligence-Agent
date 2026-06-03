@@ -4,6 +4,16 @@ import { useWebSocket } from "../hooks/useWebSocket";
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const WS  = import.meta.env.VITE_WS_URL  || "ws://localhost:8000/ws";
 
+const ZONE_NAMES = {
+  zone_01:"Koramangala", zone_02:"HSR Layout", zone_03:"Indiranagar",
+  zone_04:"BTM Layout",  zone_05:"Whitefield", zone_06:"Jayanagar",
+  zone_07:"Marathahalli",zone_08:"Electronic City", zone_09:"Bannerghatta Rd",
+  zone_10:"Rajajinagar", zone_11:"Malleshwaram", zone_12:"Yelahanka",
+  zone_13:"JP Nagar",    zone_14:"Hebbal",      zone_15:"Sarjapur Rd",
+  zone_16:"Bellandur",   zone_17:"Banashankari",zone_18:"MG Road",
+  zone_19:"Cunningham Rd",zone_20:"Kengeri",
+};
+
 const STATUS_BADGE = {
   pending:  "badge-pending",
   approved: "badge-approved",
@@ -102,6 +112,29 @@ export function ActionLog() {
               {action.approved_at && <span>Approved {fmt(action.approved_at)}</span>}
               {action.executed_at && <span>Executed {fmt(action.executed_at)}</span>}
             </div>
+
+            {(action.status === "executed" || action.status === "resolved") && (action.proposed_actions || []).length > 0 && (() => {
+              const deltas = {};
+              action.proposed_actions.forEach((m) => {
+                if (m.type === "move_agent") {
+                  deltas[m.from_zone] = (deltas[m.from_zone] || 0) - 1;
+                  deltas[m.to_zone]   = (deltas[m.to_zone]   || 0) + 1;
+                }
+              });
+              return (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
+                  {Object.entries(deltas).map(([zoneId, delta]) => (
+                    <span key={zoneId} style={{
+                      fontSize: 11, fontWeight: 600, padding: "2px 7px", borderRadius: 999,
+                      background: delta > 0 ? "#14532d44" : "#7f1d1d44",
+                      color: delta > 0 ? "#22c55e" : "#ef4444",
+                    }}>
+                      {delta > 0 ? `+${delta}` : delta} {ZONE_NAMES[zoneId] || zoneId}
+                    </span>
+                  ))}
+                </div>
+              );
+            })()}
 
             {action.outcome && (
               <div style={{ marginTop: 8, padding: "6px 10px", background: "#14532d22", borderRadius: 6, border: "1px solid #14532d" }}>

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useWebSocket } from "../hooks/useWebSocket";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -37,6 +37,8 @@ const STATUS_COLOR = {
 export function CityMap() {
   const [zones, setZones] = useState([]);
   const [tooltip, setTooltip] = useState(null);
+  const [flashDeltas, setFlashDeltas] = useState({});
+  const flashedActions = useRef(new Set());
   const { messages } = useWebSocket(WS);
 
   // Initial load
@@ -66,6 +68,40 @@ export function CityMap() {
       setZones((prev) =>
         prev.map((z) => (z.zone_id === msg.data.zone_id ? msg.data : z))
       );
+    });
+  }, [messages]);
+
+  // Flash before→after on zones when an action executes (once per action)
+  useEffect(() => {
+    const executed = messages.filter(
+      (m) => m.type === "action_log_update" && m.data.status === "executed"
+      && !flashedActions.current.has(m.data.action_id)
+    );
+    if (executed.length === 0) return;
+    executed.forEach((msg) => {
+      flashedActions.current.add(msg.data.action_id);
+      const changes = msg.data.zone_changes || [];
+      if (changes.length === 0) return;
+      // Immediately update circle numbers with the authoritative values
+      setZones((prev) =>
+        prev.map((z) => {
+          const change = changes.find((c) => c.zone_id === z.zone_id);
+          return change ? { ...z, idle_agents: change.idle_after } : z;
+        })
+      );
+      // Show flash overlay for 2.5s
+      const newDeltas = {};
+      changes.forEach(({ zone_id, idle_before, idle_after, delta }) => {
+        newDeltas[zone_id] = { delta, idle_before, idle_after };
+      });
+      setFlashDeltas((prev) => ({ ...prev, ...newDeltas }));
+      setTimeout(() => {
+        setFlashDeltas((prev) => {
+          const next = { ...prev };
+          changes.forEach(({ zone_id }) => delete next[zone_id]);
+          return next;
+        });
+      }, 5000);
     });
   }, [messages]);
 
@@ -148,6 +184,27 @@ export function CityMap() {
               >
                 {zone.name.split(" ")[0]}
               </text>
+
+              {/* before→after flash when agents redistributed */}
+              {flashDeltas[zone_id] !== undefined && (() => {
+                const { delta, idle_before, idle_after } = flashDeltas[zone_id];
+                const sign  = delta > 0 ? `+${delta}` : `${delta}`;
+                const col   = delta > 0 ? "#22c55e" : "#ef4444";
+                return (
+                  <text
+                    x={pos.x}
+                    y={pos.y - 26}
+                    textAnchor="middle"
+                    fill={col}
+                    fontSize={11}
+                    fontWeight={700}
+                    fontFamily="Inter, sans-serif"
+                    style={{ animation: "slide-in 0.3s ease" }}
+                  >
+                    {idle_before}{sign}={idle_after}
+                  </text>
+                );
+              })()}
             </g>
           );
         })}

@@ -37,15 +37,17 @@ Your decision process each cycle:
 1. Call get_city_state — see the live MongoDB Atlas data
 2. Call get_upcoming_events — check for predicted spikes to handle proactively
 3. For critical zones, call query_historical_patterns — reference past data
-4. Call get_surplus_zones — find where to pull agents from
+4. Call get_nearby_surplus_zones(zone_id) — find geographically close zones (within 8 km) with idle agents
 5. Call propose_action — submit recommendation (max 2 per cycle)
 
 Rules:
-- Only act on zones where avg_wait > 35 min AND agent shortage > 5
-- Write reasoning a human manager can read and act on in 10 seconds
+- For autonomous monitoring: only act on zones where avg_wait > 35 min AND agent shortage > 5
+- For MANAGER ESCALATION: address the goal directly regardless of thresholds — the manager sees something you don't. Find the zone they mention, check its state, and propose a redistribution even if wait times look acceptable. Use action_type "agent_redistribution".
+- PROXIMITY RULE: Only source agents from zones within 8 km of the target. Agents cannot travel across the city. Use get_nearby_surplus_zones to find valid sources.
+- MULTI-SOURCE RULE: Never drain a single zone. Split the needed agents across 2–3 nearby source zones. Pass all source zone IDs comma-separated in source_zone_ids e.g. "zone_02,zone_04,zone_06".
+- Write reasoning a human manager can read and act on in 10 seconds — include which zones agents come from and why
 - For upcoming events use action_type "preemptive_redistribution"
-- For current critical zones use action_type "agent_redistribution"
-- If a manager goal is included, address it specifically
+- Always call propose_action if there is a MANAGER ESCALATION, unless there are genuinely zero idle agents anywhere
 """
 
 
@@ -59,13 +61,13 @@ def run_gemini_cycle(db, anomalies: list, manager_goal: str = None) -> bool:
     pending_docs = list(db.action_log.find({"status": "pending"}, {"trigger_zone": 1}))
     pending_zone_ids = {d.get("trigger_zone") for d in pending_docs if d.get("trigger_zone")}
 
-    city_context = _build_city_context(db, anomalies, pending_zone_ids)
+    city_context = _build_city_context(db, anomalies, pending_zone_ids, force=bool(manager_goal))
     if not city_context and not manager_goal:
         return True  # nothing to do, not a failure
 
     prompt_parts = []
     if manager_goal:
-        prompt_parts.append(f"MANAGER ESCALATION: \"{manager_goal}\"\n")
+        prompt_parts.append(f"MANAGER ESCALATION: \"{manager_goal}\"\nAddress this goal directly. Call get_city_state to find the zone, then propose a redistribution.\n")
     prompt_parts.append(city_context)
     prompt = "\n".join(prompt_parts)
 
@@ -108,19 +110,31 @@ def run_gemini_cycle(db, anomalies: list, manager_goal: str = None) -> bool:
             return json.dumps({"found": False})
         return json.dumps({"found": True, **pattern})
 
-    def get_surplus_zones() -> str:
-        """Find zones in MongoDB Atlas with surplus idle agents available for redistribution."""
-        zones = list(db.city_grid.find({}, {"_id": 0}))
-        surplus = [
-            z for z in zones
-            if z["idle_agents"] > z["active_orders"] * 1.5 and z["idle_agents"] > 6
+    def get_nearby_surplus_zones(zone_id: str) -> str:
+        """Find zones within 8 km of the target that have surplus idle agents.
+        Always call this before propose_action to ensure sources are geographically realistic.
+
+        Args:
+            zone_id: The destination zone that needs agents
+        """
+        from zone_distances import nearby_surplus_zones
+        all_zones = list(db.city_grid.find({}, {"_id": 0}))
+        nearby = nearby_surplus_zones(zone_id, all_zones)
+        result = [
+            {
+                "zone_id": z["zone_id"],
+                "name": z["name"],
+                "idle_agents": z["idle_agents"],
+                "active_orders": z["active_orders"],
+                "distance_km": round(dist, 1),
+            }
+            for dist, z in nearby[:5]
         ]
-        surplus.sort(key=lambda z: z["idle_agents"], reverse=True)
-        return json.dumps(surplus[:5])
+        return json.dumps(result)
 
     def propose_action(
         zone_id: str,
-        source_zone_id: str,
+        source_zone_ids: str,
         agents_to_move: int,
         recommendation: str,
         reasoning: str,
@@ -130,8 +144,8 @@ def run_gemini_cycle(db, anomalies: list, manager_goal: str = None) -> bool:
 
         Args:
             zone_id: Destination zone that needs agents
-            source_zone_id: Source zone with surplus idle agents
-            agents_to_move: Number of agents to move (5-15)
+            source_zone_ids: Comma-separated source zone IDs within 8 km e.g. "zone_02,zone_04"
+            agents_to_move: Total number of agents to move (5-15)
             recommendation: One-line summary for the approval card title
             reasoning: 2-4 sentence reasoning for the human manager
             action_type: agent_redistribution or preemptive_redistribution
@@ -141,18 +155,49 @@ def run_gemini_cycle(db, anomalies: list, manager_goal: str = None) -> bool:
         if proposals_made[0] >= 2:
             return json.dumps({"status": "skipped", "reason": "max 2 per cycle"})
 
-        agents = list(db.agents.aggregate([
-            {"$match": {"current_zone": source_zone_id, "status": "idle"}},
-            {"$sample": {"size": min(int(agents_to_move), 20)}},
-        ]))
-        if not agents:
-            return json.dumps({"status": "skipped", "reason": f"no idle agents in {source_zone_id}"})
+        source_ids = [s.strip() for s in source_zone_ids.split(",") if s.strip()]
+        if not source_ids:
+            return json.dumps({"status": "skipped", "reason": "no source zones provided"})
 
-        moves = [
-            {"type": "move_agent", "agent_id": a["agent_id"],
-             "from_zone": source_zone_id, "to_zone": zone_id}
-            for a in agents
-        ]
+        all_zones = list(db.city_grid.find({}, {"_id": 0}))
+        zone_map = {z["zone_id"]: z for z in all_zones}
+
+        sources_with_surplus = []
+        for sid in source_ids[:3]:
+            z = zone_map.get(sid)
+            if not z:
+                continue
+            surplus = max(0, z["idle_agents"] - max(2, int(z.get("active_orders", 0) * 0.4)))
+            if surplus > 0:
+                sources_with_surplus.append((z, surplus))
+
+        if not sources_with_surplus:
+            return json.dumps({"status": "skipped", "reason": "no idle agents in specified source zones"})
+
+        total_surplus = sum(s for _, s in sources_with_surplus)
+        moves = []
+        remaining = min(int(agents_to_move), 20)
+
+        for source_zone, surplus in sources_with_surplus:
+            if remaining <= 0:
+                break
+            take = max(1, min(round(agents_to_move * surplus / total_surplus), surplus, remaining))
+            agents = list(db.agents.aggregate([
+                {"$match": {"current_zone": source_zone["zone_id"], "status": "idle"}},
+                {"$sample": {"size": take}},
+            ]))
+            for a in agents:
+                moves.append({
+                    "type": "move_agent",
+                    "agent_id": a["agent_id"],
+                    "from_zone": source_zone["zone_id"],
+                    "to_zone": zone_id,
+                })
+            remaining -= len(agents)
+
+        if not moves:
+            return json.dumps({"status": "skipped", "reason": "could not sample agents from source zones"})
+
         action = {
             "action_id":        f"act_{uuid4().hex[:6]}",
             "type":             action_type,
@@ -172,7 +217,7 @@ def run_gemini_cycle(db, anomalies: list, manager_goal: str = None) -> bool:
         db.action_log.insert_one(action)
         pending_zone_ids.add(zone_id)
         proposals_made[0] += 1
-        print(f"[gemini] proposed {action['action_id']} ({action_type}) → {zone_id}", flush=True)
+        print(f"[gemini] proposed {action['action_id']} ({action_type}) → {zone_id} from [{source_zone_ids}]", flush=True)
         return json.dumps({"status": "proposed", "action_id": action["action_id"]})
 
     # ── Call Gemini with automatic function calling ────────────────────────────
@@ -186,7 +231,7 @@ def run_gemini_cycle(db, anomalies: list, manager_goal: str = None) -> bool:
                     get_city_state,
                     get_upcoming_events,
                     query_historical_patterns,
-                    get_surplus_zones,
+                    get_nearby_surplus_zones,
                     propose_action,
                 ],
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(
@@ -204,7 +249,7 @@ def run_gemini_cycle(db, anomalies: list, manager_goal: str = None) -> bool:
         return False
 
 
-def _build_city_context(db, anomalies: list, pending_zone_ids: set) -> str:
+def _build_city_context(db, anomalies: list, pending_zone_ids: set, force: bool = False) -> str:
     actionable = [a for a in anomalies if a["zone"]["zone_id"] not in pending_zone_ids]
 
     if not actionable:
@@ -212,7 +257,7 @@ def _build_city_context(db, anomalies: list, pending_zone_ids: set) -> str:
         has_upcoming = db.scheduled_events.count_documents(
             {"status": "upcoming", "scheduled_time": {"$lte": cutoff}}
         )
-        if not has_upcoming:
+        if not has_upcoming and not force:
             return ""
 
     lines = [f"Time: {datetime.utcnow().strftime('%H:%M UTC')} — Bangalore delivery network\n"]

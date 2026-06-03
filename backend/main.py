@@ -120,9 +120,11 @@ async def simulate_city_state():
                 new_orders   = random.randint(*arrival)
                 active_orders += new_orders
 
-                # Step 3 — ALL idle agents pick up orders from the full backlog
-                can_assign   = min(idle_agents, active_orders)
-                idle_agents  = max(0, idle_agents - can_assign)
+                # Step 3 — idle agents pick up orders, keeping 25% as reserve
+                reserve      = max(2, int(total_agents * 0.25))
+                assignable   = max(0, idle_agents - reserve)
+                can_assign   = min(assignable, active_orders)
+                idle_agents  = max(reserve, idle_agents - can_assign)
                 active_agents = total_agents - idle_agents
 
                 # Step 4 — wait time based on unserved backlog
@@ -210,8 +212,10 @@ async def get_action_log():
 
 @app.post("/approve/{action_id}")
 async def approve_action(action_id: str, body: dict = {}):
-    db = get_async_db()
-    await db.action_log.update_one(
+    from tools.execute_action import execute_action as _execute
+    db_async = get_async_db()
+    db_sync  = get_db()
+    await db_async.action_log.update_one(
         {"action_id": action_id},
         {"$set": {
             "status": "approved",
@@ -220,6 +224,8 @@ async def approve_action(action_id: str, body: dict = {}):
             "modification": body.get("modification"),
         }},
     )
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, lambda: _execute(db_sync, action_id))
     return {"status": "approved"}
 
 
