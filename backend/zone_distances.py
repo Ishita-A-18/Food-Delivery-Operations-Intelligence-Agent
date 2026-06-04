@@ -69,33 +69,39 @@ def multi_source_moves(
     needed: int,
     all_zones: list,
 ) -> tuple[list, list]:
-    """Pull agents from up to 3 nearby surplus zones proportionally.
+    """Pull agents from up to 3 nearby surplus zones.
 
-    Returns:
-        moves: list of move_agent dicts ready for proposed_actions
-        descriptions: human-readable strings like "HSR Layout (3, 2.1km)"
+    Priority order:
+      1. Nearest first — zones are bucketed in 0.5 km bands so genuinely close zones
+         are treated as equally proximate.
+      2. Most abundant within the same band — the zone with more spare agents is
+         preferred when two candidates are at similar distance.
+    Allocation is greedy: each selected zone contributes as many agents as it can
+    spare before moving to the next, so the closest zone is drained first.
     """
-    nearby = nearby_surplus_zones(target_zone_id, all_zones)
+    nearby = nearby_surplus_zones(target_zone_id, all_zones)  # already distance-sorted
     if not nearby:
         return [], []
 
-    top3 = nearby[:3]
-    surpluses = [
-        max(0, z["idle_agents"] - max(2, int(z.get("active_orders", 0) * 0.4)))
-        for _, z in top3
-    ]
-    total_surplus = sum(surpluses)
-    if total_surplus == 0:
-        return [], []
+    def _sort_key(item: tuple) -> tuple:
+        dist, z = item
+        surplus = max(0, z["idle_agents"] - max(2, int(z.get("active_orders", 0) * 0.4)))
+        # bucket distance to 0.5 km so zones at e.g. 2.1 km and 2.4 km tie on proximity
+        return (round(dist * 2) / 2, -surplus)
+
+    candidates = sorted(nearby[:5], key=_sort_key)[:3]
 
     moves: list = []
     descriptions: list = []
     remaining = needed
 
-    for (dist, source), surplus in zip(top3, surpluses):
-        if remaining <= 0 or surplus == 0:
+    for dist, source in candidates:
+        if remaining <= 0:
+            break
+        surplus = max(0, source["idle_agents"] - max(2, int(source.get("active_orders", 0) * 0.4)))
+        if surplus == 0:
             continue
-        take = max(1, min(round(needed * surplus / total_surplus), surplus, remaining))
+        take = min(surplus, remaining)  # greedy: take as much as available here
         agents = list(db.agents.aggregate([
             {"$match": {"current_zone": source["zone_id"], "status": "idle"}},
             {"$sample": {"size": take}},

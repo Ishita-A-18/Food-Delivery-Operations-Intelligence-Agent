@@ -113,14 +113,33 @@ export function ActionLog() {
               {action.executed_at && <span>Executed {fmt(action.executed_at)}</span>}
             </div>
 
-            {(action.status === "executed" || action.status === "resolved") && (action.proposed_actions || []).length > 0 && (() => {
+            {(action.status === "executed" || action.status === "resolved") && (() => {
+              // Use zone_changes if available — has exact before/after values
+              if (action.zone_changes && action.zone_changes.length > 0) {
+                return (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
+                    {action.zone_changes.map(({ zone_id, idle_before, idle_after, delta }) => (
+                      <span key={zone_id} style={{
+                        fontSize: 11, fontWeight: 600, padding: "2px 7px", borderRadius: 999,
+                        background: delta > 0 ? "#14532d44" : "#7f1d1d44",
+                        color: delta > 0 ? "#22c55e" : "#ef4444",
+                      }}>
+                        {delta > 0 ? `+${delta}` : delta} {ZONE_NAMES[zone_id] || zone_id}
+                        <span style={{ fontWeight: 400, opacity: 0.8 }}> ({idle_before}→{idle_after})</span>
+                      </span>
+                    ))}
+                  </div>
+                );
+              }
+              // Fallback: compute from proposed_actions
               const deltas = {};
-              action.proposed_actions.forEach((m) => {
+              (action.proposed_actions || []).forEach((m) => {
                 if (m.type === "move_agent") {
                   deltas[m.from_zone] = (deltas[m.from_zone] || 0) - 1;
                   deltas[m.to_zone]   = (deltas[m.to_zone]   || 0) + 1;
                 }
               });
+              if (Object.keys(deltas).length === 0) return null;
               return (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
                   {Object.entries(deltas).map(([zoneId, delta]) => (

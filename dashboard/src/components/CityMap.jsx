@@ -60,15 +60,26 @@ export function CityMap() {
     return () => clearInterval(id);
   }, []);
 
-  // Live updates via WebSocket
+  // Live updates via WebSocket.
+  // messages are newest-first → take only the latest per zone.
+  // If a zone was just redistributed (_action_executed_at stamp), skip any
+  // city_grid_update whose last_updated predates the redistribution.
   useEffect(() => {
     const cityUpdates = messages.filter((m) => m.type === "city_grid_update");
     if (cityUpdates.length === 0) return;
+    const latestByZone = {};
     cityUpdates.forEach((msg) => {
-      setZones((prev) =>
-        prev.map((z) => (z.zone_id === msg.data.zone_id ? msg.data : z))
-      );
+      if (!latestByZone[msg.data.zone_id]) latestByZone[msg.data.zone_id] = msg.data;
     });
+    setZones((prev) =>
+      prev.map((z) => {
+        const incoming = latestByZone[z.zone_id];
+        if (!incoming) return z;
+        if (z._action_executed_at && incoming.last_updated <= z._action_executed_at) return z;
+        const { _action_executed_at, ...rest } = incoming;
+        return rest;
+      })
+    );
   }, [messages]);
 
   // Flash before→after on zones when an action executes (once per action)
@@ -80,16 +91,32 @@ export function CityMap() {
     if (executed.length === 0) return;
     executed.forEach((msg) => {
       flashedActions.current.add(msg.data.action_id);
-      const changes = msg.data.zone_changes || [];
+
+      // Use zone_changes (exact values) or fall back to proposed_actions
+      let changes = msg.data.zone_changes || [];
+      if (changes.length === 0) {
+        const deltaMap = {};
+        (msg.data.proposed_actions || []).forEach((move) => {
+          if (move.type !== "move_agent") return;
+          deltaMap[move.from_zone] = (deltaMap[move.from_zone] || 0) - 1;
+          deltaMap[move.to_zone]   = (deltaMap[move.to_zone]   || 0) + 1;
+        });
+        changes = Object.entries(deltaMap).map(([zone_id, delta]) => ({
+          zone_id, delta, idle_before: null, idle_after: null,
+        }));
+      }
       if (changes.length === 0) return;
-      // Immediately update circle numbers with the authoritative values
+
+      // Stamp executed_at so stale city_grid_updates can't overwrite this value
+      const executedAt = msg.data.executed_at;
       setZones((prev) =>
         prev.map((z) => {
           const change = changes.find((c) => c.zone_id === z.zone_id);
-          return change ? { ...z, idle_agents: change.idle_after } : z;
+          if (!change || change.idle_after === null) return z;
+          return { ...z, idle_agents: change.idle_after, _action_executed_at: executedAt };
         })
       );
-      // Show flash overlay for 2.5s
+
       const newDeltas = {};
       changes.forEach(({ zone_id, idle_before, idle_after, delta }) => {
         newDeltas[zone_id] = { delta, idle_before, idle_after };
@@ -151,14 +178,15 @@ export function CityMap() {
                   <animate attributeName="opacity" from="0.4" to="0" dur="1.5s" repeatCount="indefinite" />
                 </circle>
               )}
-              {/* Zone circle */}
+              {/* Zone circle — dashed when locked by a pending/executed redistribution */}
               <circle
                 cx={pos.x}
                 cy={pos.y}
                 r={18}
                 fill={color + "22"}
                 stroke={color}
-                strokeWidth={1.5}
+                strokeWidth={zone.locked ? 2 : 1.5}
+                strokeDasharray={zone.locked ? "4 2" : "none"}
               />
               {/* Idle agent count */}
               <text

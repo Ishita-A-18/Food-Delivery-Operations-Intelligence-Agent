@@ -88,7 +88,7 @@ async def simulate_city_state():
     """Every 30s: orders arrive, complete, agents go idle/active — zones heat up and cool down naturally."""
     db = get_async_db()
     while True:
-        await asyncio.sleep(30)
+        await asyncio.sleep(60)
         try:
             # IST = UTC + 5:30 — determine time-of-day arrival rate
             ist_hour = (datetime.utcnow().hour + 5) % 24
@@ -105,6 +105,8 @@ async def simulate_city_state():
 
             zones = await db.city_grid.find().to_list(None)
             for zone in zones:
+                if zone.get("locked"):
+                    continue
                 total_agents  = zone["total_agents"]
                 active_orders = zone["active_orders"]
                 idle_agents   = zone["idle_agents"]
@@ -120,8 +122,8 @@ async def simulate_city_state():
                 new_orders   = random.randint(*arrival)
                 active_orders += new_orders
 
-                # Step 3 — idle agents pick up orders, keeping 25% as reserve
-                reserve      = max(2, int(total_agents * 0.25))
+                # Step 3 — idle agents pick up orders, keeping 35% as reserve
+                reserve      = max(2, int(total_agents * 0.35))
                 assignable   = max(0, idle_agents - reserve)
                 can_assign   = min(assignable, active_orders)
                 idle_agents  = max(reserve, idle_agents - can_assign)
@@ -134,7 +136,7 @@ async def simulate_city_state():
                 shortage = active_orders - idle_agents
                 if wait > 35 and shortage > 5:
                     status = "critical"
-                elif wait > 22 or shortage > 3:
+                elif wait > 22:
                     status = "watch"
                 else:
                     status = "normal"
@@ -177,6 +179,40 @@ def _run_agent_loop():
     agent_loop()
 
 
+def _process_goal_now(goal_text: str) -> None:
+    """Process a manager chat goal immediately in a background thread."""
+    from tools.read_city_state import read_city_state
+    from gemini_agent import run_gemini_cycle
+    from agent_loop import _fallback_goal
+    from uuid import uuid4
+    db = get_db()
+    try:
+        anomalies = read_city_state(db)
+        ids_before = {a["action_id"] for a in db.action_log.find({"status": "pending"}, {"action_id": 1})}
+        run_gemini_cycle(db, anomalies, manager_goal=goal_text)
+        ids_after = {a["action_id"] for a in db.action_log.find({"status": "pending"}, {"action_id": 1})}
+        if not ids_after - ids_before:
+            _fallback_goal(db, goal_text)
+        ids_final = {a["action_id"] for a in db.action_log.find({"status": "pending"}, {"action_id": 1})}
+        if not ids_final - ids_before:
+            db.agent_notifications.insert_one({
+                "notification_id": f"notif_{uuid4().hex[:6]}",
+                "agent_id": "system",
+                "action_id": None,
+                "message": f"Cannot fulfill \"{goal_text[:60]}\": no nearby zones have available agents to redistribute.",
+                "status": "info",
+                "sent_at": datetime.utcnow().isoformat(),
+                "acknowledged_at": None,
+            })
+        db.manager_goals.update_one(
+            {"goal": goal_text, "status": "pending"},
+            {"$set": {"status": "processed"}},
+        )
+        print(f"[goal] processed immediately: {goal_text[:60]}", flush=True)
+    except Exception as exc:
+        print(f"[goal] error processing: {exc}", flush=True)
+
+
 @app.on_event("startup")
 async def startup():
     loop = asyncio.get_event_loop()
@@ -215,6 +251,8 @@ async def approve_action(action_id: str, body: dict = {}):
     from tools.execute_action import execute_action as _execute
     db_async = get_async_db()
     db_sync  = get_db()
+    # Release all zones locked by previous redistributions — new approval is the next intervention
+    await db_async.city_grid.update_many({"locked": True}, {"$unset": {"locked": ""}})
     await db_async.action_log.update_one(
         {"action_id": action_id},
         {"$set": {
@@ -232,6 +270,18 @@ async def approve_action(action_id: str, body: dict = {}):
 @app.post("/reject/{action_id}")
 async def reject_action(action_id: str):
     db = get_async_db()
+    action = await db.action_log.find_one({"action_id": action_id})
+    if action:
+        zone_ids = {action.get("zone_id")}
+        for move in action.get("proposed_actions", []):
+            if move.get("type") == "move_agent":
+                zone_ids.add(move.get("from_zone"))
+        zone_ids.discard(None)
+        if zone_ids:
+            await db.city_grid.update_many(
+                {"zone_id": {"$in": list(zone_ids)}},
+                {"$unset": {"locked": "", "locked_until": ""}},
+            )
     await db.action_log.update_one(
         {"action_id": action_id},
         {"$set": {"status": "rejected"}},
@@ -244,10 +294,13 @@ async def receive_goal(body: dict):
     goal_text = body.get("goal", "").strip()
     if not goal_text:
         return {"status": "error", "message": "goal text required"}
-    db = get_async_db()
-    await db.manager_goals.insert_one({
+    db_async = get_async_db()
+    await db_async.manager_goals.insert_one({
         "goal": goal_text,
         "status": "pending",
         "created_at": datetime.utcnow().isoformat(),
     })
+    # Process immediately instead of waiting for the 60s loop tick
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, lambda: _process_goal_now(goal_text))
     return {"status": "received"}

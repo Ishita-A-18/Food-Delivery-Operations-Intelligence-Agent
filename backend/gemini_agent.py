@@ -217,6 +217,14 @@ def run_gemini_cycle(db, anomalies: list, manager_goal: str = None) -> bool:
         db.action_log.insert_one(action)
         pending_zone_ids.add(zone_id)
         proposals_made[0] += 1
+
+        # Lock target + source zones so simulation skips them while action is pending
+        lock_ids = {zone_id} | {m["from_zone"] for m in moves}
+        db.city_grid.update_many(
+            {"zone_id": {"$in": list(lock_ids)}},
+            {"$set": {"locked": True}},
+        )
+
         print(f"[gemini] proposed {action['action_id']} ({action_type}) → {zone_id} from [{source_zone_ids}]", flush=True)
         return json.dumps({"status": "proposed", "action_id": action["action_id"]})
 

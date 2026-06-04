@@ -105,6 +105,15 @@ def _fallback_goal(db, goal_text: str) -> None:
 
     moves, descriptions = multi_source_moves(db, zone_id, 6, all_zones)
     if not moves:
+        db.agent_notifications.insert_one({
+            "notification_id": f"notif_{uuid4().hex[:6]}",
+            "agent_id": "system",
+            "action_id": None,
+            "message": f"Cannot redistribute to {target_zone['name']}: no nearby zones have available agents to spare.",
+            "status": "info",
+            "sent_at": datetime.utcnow().isoformat(),
+            "acknowledged_at": None,
+        })
         return
 
     sources_text = " · ".join(descriptions)
@@ -127,6 +136,8 @@ def _fallback_goal(db, goal_text: str) -> None:
         "modification": None, "executed_at": None, "outcome": None,
     }
     db.action_log.insert_one(action)
+    lock_ids = {zone_id} | {m["from_zone"] for m in moves}
+    db.city_grid.update_many({"zone_id": {"$in": list(lock_ids)}}, {"$set": {"locked": True}})
     print(f"[fallback] goal → proposed {action['action_id']} for {zone_id} from [{sources_text}]", flush=True)
 
 
@@ -185,6 +196,8 @@ def _fallback_propose(db, anomalies: list) -> None:
         db.action_log.insert_one(action)
         pending_zone_ids.add(zone_id)
         proposed += 1
+        lock_ids = {zone_id} | {m["from_zone"] for m in moves}
+        db.city_grid.update_many({"zone_id": {"$in": list(lock_ids)}}, {"$set": {"locked": True}})
         print(f"[fallback] proposed {action['action_id']} for {zone_id} from [{sources_text}]", flush=True)
 
     if proposed < 2:
@@ -248,4 +261,6 @@ def _fallback_proactive(db, pending_zone_ids: set, already_proposed: int) -> Non
             )
             pending_zone_ids.add(zone_id)
             proposed += 1
+            lock_ids = {zone_id} | {m["from_zone"] for m in moves}
+            db.city_grid.update_many({"zone_id": {"$in": list(lock_ids)}}, {"$set": {"locked": True}})
             print(f"[fallback] PROACTIVE {action['action_id']} for {zone_id} from [{sources_text}]", flush=True)

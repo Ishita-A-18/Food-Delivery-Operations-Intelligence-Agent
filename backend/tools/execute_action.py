@@ -64,7 +64,7 @@ def execute_action(db, action_id: str) -> None:
         shortage    = zone["active_orders"] - new_idle
         if wait > 35 and shortage > 5:
             status = "critical"
-        elif wait > 22 or shortage > 3:
+        elif wait > 22:
             status = "watch"
         else:
             status = "normal"
@@ -93,3 +93,5 @@ def execute_action(db, action_id: str) -> None:
             "zone_changes": zone_changes,
         }},
     )
+
+    # Zones remain locked after execution — only another redistribution action can change them
