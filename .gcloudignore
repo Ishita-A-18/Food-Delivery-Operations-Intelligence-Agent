@@ -1,0 +1,7 @@
+.git/
+venv/
+dashboard/
+seeder/
+.env
+*.pyc
+__pycache__/
