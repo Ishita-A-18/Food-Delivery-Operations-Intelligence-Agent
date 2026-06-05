@@ -1,6 +1,7 @@
 .git/
 venv/
-dashboard/
+dashboard/node_modules/
+dashboard/.vercel/
 seeder/
 .env
 *.pyc
