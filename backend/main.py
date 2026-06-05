@@ -104,6 +104,8 @@ async def simulate_city_state():
                 arrival = (0, 3)   # off-peak
 
             zones = await db.city_grid.find().to_list(None)
+            pending = []
+
             for zone in zones:
                 if zone.get("locked"):
                     continue
@@ -132,24 +134,59 @@ async def simulate_city_state():
                 # Step 4 — wait time based on unserved backlog
                 unserved = max(0, active_orders - active_agents)
                 wait = round(min(max(8.0 + unserved * 2.5 + random.uniform(-2, 2), 4.0), 90.0), 1)
-
                 shortage = active_orders - idle_agents
-                if wait > 35 and shortage > 5:
-                    status = "critical"
-                elif wait > 22:
-                    status = "watch"
-                else:
-                    status = "normal"
 
+                pending.append({
+                    "zone_id":       zone["zone_id"],
+                    "active_orders": active_orders,
+                    "idle_agents":   idle_agents,
+                    "active_agents": active_agents,
+                    "avg_wait_minutes": wait,
+                    "_severity":     wait * 2 + max(0, shortage),
+                    "_raw_critical": wait > 35 and shortage > 5,
+                    "_raw_watch":    wait > 22,
+                })
+
+            # Enforce 1–2 critical, 1–3 watch. Sort worst-first so the worst zones
+            # earn elevated status first; force-promote if nothing hits thresholds.
+            pending.sort(key=lambda z: z["_severity"], reverse=True)
+            critical_slots, watch_slots = 2, 3
+            statuses = []
+            crit_count = watch_count = 0
+            for u in pending:
+                if u["_raw_critical"] and critical_slots > 0:
+                    s = "critical"; critical_slots -= 1; crit_count += 1
+                elif u["_raw_watch"] and watch_slots > 0:
+                    s = "watch"; watch_slots -= 1; watch_count += 1
+                else:
+                    s = "normal"
+                statuses.append(s)
+
+            locked_ids = {z["zone_id"] for z in zones if z.get("locked")}
+            if crit_count < 1:
+                for i, u in enumerate(pending):
+                    if statuses[i] != "critical" and u["zone_id"] not in locked_ids:
+                        if statuses[i] == "watch":
+                            watch_count -= 1
+                        statuses[i] = "critical"; crit_count += 1
+                        break
+            if watch_count < 1:
+                for i, u in enumerate(pending):
+                    if statuses[i] == "normal" and u["zone_id"] not in locked_ids:
+                        statuses[i] = "watch"; watch_count += 1
+                        break
+
+            now_iso = datetime.utcnow().isoformat()
+            for u, status in zip(pending, statuses):
                 await db.city_grid.update_one(
-                    {"zone_id": zone["zone_id"]},
+                    {"zone_id": u["zone_id"]},
                     {"$set": {
-                        "active_orders":    active_orders,
-                        "idle_agents":      idle_agents,
-                        "active_agents":    active_agents,
-                        "avg_wait_minutes": wait,
+                        "active_orders":    u["active_orders"],
+                        "idle_agents":      u["idle_agents"],
+                        "active_agents":    u["active_agents"],
+                        "avg_wait_minutes": u["avg_wait_minutes"],
                         "status":           status,
-                        "last_updated":     datetime.utcnow().isoformat(),
+                        "last_updated":     now_iso,
                     }},
                 )
         except Exception as exc:

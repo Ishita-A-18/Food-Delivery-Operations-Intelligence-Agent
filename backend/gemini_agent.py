@@ -41,7 +41,7 @@ Your decision process each cycle:
 5. Call propose_action — submit recommendation (max 2 per cycle)
 
 Rules:
-- For autonomous monitoring: only act on zones where avg_wait > 35 min AND agent shortage > 5
+- For autonomous monitoring: act on zones where status is "critical" OR avg_wait > 25 min AND agent shortage > 3
 - For MANAGER ESCALATION: address the goal directly regardless of thresholds — the manager sees something you don't. Find the zone they mention, check its state, and propose a redistribution even if wait times look acceptable. Use action_type "agent_redistribution".
 - PROXIMITY RULE: Only source agents from zones within 8 km of the target. Agents cannot travel across the city. Use get_nearby_surplus_zones to find valid sources.
 - MULTI-SOURCE RULE: Never drain a single zone. Split the needed agents across 2–3 nearby source zones. Pass all source zone IDs comma-separated in source_zone_ids e.g. "zone_02,zone_04,zone_06".
