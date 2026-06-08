@@ -341,3 +341,18 @@ async def receive_goal(body: dict):
     loop = asyncio.get_event_loop()
     loop.run_in_executor(None, lambda: _process_goal_now(goal_text))
     return {"status": "received"}
+
+
+# ── Serve React frontend (must be last) ───────────────────────────────────────
+
+import os as _os
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+_static = _os.path.join(_os.path.dirname(__file__), "static")
+if _os.path.isdir(_static):
+    app.mount("/assets", StaticFiles(directory=f"{_static}/assets"), name="assets")
+
+    @app.get("/{_full_path:path}")
+    async def serve_spa(_full_path: str = ""):
+        return FileResponse(f"{_static}/index.html")
