@@ -1,14 +1,19 @@
+import { useState } from "react";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { CityMap } from "./components/CityMap";
 import { ApprovalCard } from "./components/ApprovalCard";
 import { ActionLog } from "./components/ActionLog";
 import { ChatInput } from "./components/ChatInput";
 import { AgentNotificationPanel } from "./components/AgentNotificationPanel";
+import { IntroPage } from "./components/IntroPage";
 
 const WS = import.meta.env.VITE_WS_URL || "ws://localhost:8000/ws";
 
 export default function App() {
+  const [showIntro, setShowIntro] = useState(true);
   const { connected } = useWebSocket(WS);
+
+  if (showIntro) return <IntroPage onEnter={() => setShowIntro(false)} />;
 
   return (
     <div className="app-shell">
