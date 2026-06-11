@@ -51,11 +51,32 @@ Rules:
 """
 
 
+def _make_client():
+    """
+    Create a Gemini client routed through Google Cloud Vertex AI (Agent Builder)
+    when GOOGLE_CLOUD_PROJECT is set (i.e. when running on Cloud Run).
+    Falls back to direct Gemini API key for local development.
+    """
+    project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+    if project_id and project_id not in ("your-project-id", ""):
+        # Google Cloud Agent Builder — Vertex AI routes the request through
+        # Google Cloud's managed agent infrastructure
+        return genai.Client(
+            vertexai=True,
+            project=project_id,
+            location="us-central1",
+        )
+    api_key = os.getenv("GEMINI_API_KEY")
+    if api_key and api_key not in ("your_api_key_here", "your-gemini-key", ""):
+        return genai.Client(api_key=api_key)
+    return None
+
+
 def run_gemini_cycle(db, anomalies: list, manager_goal: str = None) -> bool:
     """Entry point from agent_loop (sync thread). Returns True if Gemini succeeded."""
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key or api_key == "your_api_key_here":
-        print("[gemini] GEMINI_API_KEY not set — using fallback", flush=True)
+    client = _make_client()
+    if not client:
+        print("[gemini] No credentials configured (GOOGLE_CLOUD_PROJECT or GEMINI_API_KEY) — using fallback", flush=True)
         return False
 
     pending_docs = list(db.action_log.find({"status": "pending"}, {"trigger_zone": 1}))
@@ -228,9 +249,8 @@ def run_gemini_cycle(db, anomalies: list, manager_goal: str = None) -> bool:
         print(f"[gemini] proposed {action['action_id']} ({action_type}) → {zone_id} from [{source_zone_ids}]", flush=True)
         return json.dumps({"status": "proposed", "action_id": action["action_id"]})
 
-    # ── Call Gemini with automatic function calling ────────────────────────────
+    # ── Call Gemini via Google Cloud Agent Builder (Vertex AI) ───────────────────
     try:
-        client = genai.Client(api_key=api_key)
         chat = client.chats.create(
             model="gemini-2.5-flash",
             config=types.GenerateContentConfig(

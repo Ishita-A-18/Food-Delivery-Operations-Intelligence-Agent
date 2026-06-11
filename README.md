@@ -68,11 +68,13 @@ The same tools Gemini uses internally are exposed via the Model Context Protocol
 
 | Layer | Technology |
 |---|---|
-| AI decision engine | Gemini 2.5 Flash (automatic function calling) |
-| Primary data store | MongoDB Atlas (M0 free tier compatible) |
+| AI model | Gemini 2.5 Flash |
+| Agent infrastructure | Google Cloud Vertex AI (Agent Builder) — routes Gemini calls through Google Cloud's managed agent infrastructure |
+| Agent framework | `google-genai` SDK with automatic function calling — Gemini autonomously decides which tools to call and in what order |
+| Partner MCP server | MongoDB Atlas MCP Server — exposes all MongoDB Atlas collections as MCP tools at `/mcp/sse` (SSE transport) |
+| Data store | MongoDB Atlas (M0 free tier compatible) |
 | Real-time push | MongoDB Atlas change streams → WebSocket |
-| MCP integration | Custom MCP server over SSE |
-| Backend | FastAPI (Python 3.11) |
+| Backend | FastAPI (Python 3.11) deployed on Google Cloud Run |
 | Frontend | React 18 + Vite |
 | Async MongoDB | Motor |
 | Sync MongoDB | PyMongo (agent loop thread) |
